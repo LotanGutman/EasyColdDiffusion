@@ -12,7 +12,6 @@ src/
     __init__.py
     unet.py
     diffusion_vit.py
-    sparse_video_transformer.py
     utils/
       __init__.py
       blocks.py
@@ -31,12 +30,9 @@ Additionally:
 - Includes timestep conditioning via sinusoidal embeddings.
 
 ### `src/models/diffusion_vit.py`
-- `DiffusionViT`: Vision Transformer denoiser for image diffusion.
-- Uses patch embeddings, transformer blocks, and timestep conditioning.
-
-### `src/models/sparse_video_transformer.py`
-- `SparseDiffusionVideoTransformer`: video diffusion transformer scaffold.
-- Uses a sparse attention backend through `fla` (`MultiScaleRetention`) when available, with a PyTorch attention fallback.
+- `DiffusionViT`: DiT-style image denoiser.
+- Uses per-block adaptive LayerNorm conditioning (`adaLN`) with residual gating.
+- Includes final adaptive modulation before reconstruction and zero-init output projection for stable startup.
 
 ### `src/models/utils/`
 - Shared model utilities:
@@ -65,9 +61,12 @@ This installs:
 - `einops`
 - `tqdm`
 - `pyyaml`
-- `flash-linear-attention`
 
 ## Notes
 
 - No dataset, preprocessing pipeline, or cold-diffusion degradation operators are implemented yet.
 - This repository state is intentionally a scaffold so data and experiment details can be added later.
+
+## TODO
+
+- [ ] Prepare data and augmentation and so on.
