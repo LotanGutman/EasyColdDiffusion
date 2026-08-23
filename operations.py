@@ -342,7 +342,7 @@ def cracks(image, pattern_type='random', intensity=0.75, thickness=3):
 
 
 #מוסיף נקודות של אבק וללוך
-def add_dust_and_flecks(image, num_flecks=40):
+def add_dust_and_flecks(image, num_flecks=25):
     """מוסיף גרגירי אבק זעירים ולכלוכים נקודתיים בצורה בטוחה לכל סוג תמונה."""
     result = image.copy()
     height, width = image.shape[:2]
@@ -441,41 +441,20 @@ def film_grain(image, strength=10, grain_scale_ratio=0.002):
 # Sepia
 # Applies a warm brown/yellow tone to the image.
 # --------------------------------------------------
-
 def sepia(image, amount=1.0):
-    brown_depth=0.90
-    # Sepia transformation matrix
+    # מטריצת Sepia המותאמת ישירות לסדר BGR של OpenCV
+    # ערוץ 0: B, ערוץ 1: G, ערוץ 2: R
     sepia_matrix = np.array([
-        [0.393, 0.769, 0.189],
-        [0.270 * brown_depth+0.12, 0.530, 0.130],
-        [0.170 * brown_depth, 0.340, 0.080]
-    ])
+        [0.131, 0.534, 0.272],  # Output Blue
+        [0.168, 0.686, 0.349],  # Output Green
+        [0.189, 0.769, 0.393]   # Output Red
+    ], dtype=np.float32)
 
-    # Convert BGR to RGB
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    image_float = image.astype(np.float32)
+    sepia_image = cv2.transform(image_float, sepia_matrix)
+    sepia_image = np.clip(sepia_image, 0, 255).astype(np.uint8)
 
-    # Apply the sepia transformation
-    sepia_image = image_rgb @ sepia_matrix.T
-
-    sepia_image = np.clip(sepia_image, 0, 255)
-    sepia_image = sepia_image.astype(np.uint8)
-
-    # Convert back to BGR
-    sepia_image = cv2.cvtColor(
-        sepia_image,
-        cv2.COLOR_RGB2BGR
-    )
-
-    # Blend the original image with the sepia image
-    result = cv2.addWeighted(
-        image,
-        1 - amount,
-        sepia_image,
-        amount,
-        0
-    )
-
-    return result
+    return cv2.addWeighted(image, 1 - amount, sepia_image, amount, 0)
 
 
 # --------------------------------------------------
@@ -681,41 +660,69 @@ def crumple_effect(image, num_creases=12, intensity=0.6):
 
     return np.clip(result, 0, 255).astype(np.uint8)
 
+import cv2
+import numpy as np
 
-def add_random_heavy_tear(image, max_tear_width=10, add_dark_edge=True):
+def add_random_heavy_tear(image, max_tear_width=5, add_dark_edge=True):
+    """יוצרת קרע נייר ריאליסטי - מותאם לרזולוציית 128x128.
+
+    שיפורים:
+    - תמיכה בקרע חוצה (Full-length) או קרע חלקי שנעצר באמצע התמונה (Partial
+    Tear).
+    - דיקוק הדרגתי (Tapering) ככל שהקרע מתרחק מקצה ההתחלה.
+    - אפקט שוליים מפותלים/מקופלים (Curled Flaps) עם הצללה ותאורה בהירה.
     """
-    יוצרת קרע נייר עמוק ורחב בזווית ומיקום אקראיים.
-    כולל שוליים חדים, הסטת תמונה, הצללת עומק, ומסגרת שחורה דקה להדגשת החדות.
-    """
-    skip_probability = 0.25
+    skip_probability = 0.6
     if np.random.rand() < skip_probability:
         return image.copy()
 
-
     height, width = image.shape[:2]
     img_diag = int(np.hypot(height, width))
+    is_color = len(image.shape) == 3
 
-    # 1. רנדומיזציה של זווית, מיקום ועובי
+    # --------------------------------------------------
+    # 1. הגדרת סוג הקרע והפרמטרים הגיאומטריים (מותאם ל-128x128)
+    # --------------------------------------------------
+    is_partial_tear = np.random.rand() < 0.9
+
     angle_deg = np.random.uniform(0, 360)
     angle_rad = np.radians(angle_deg)
-    tear_width = np.random.randint(8, max_tear_width + 1)
-    shift_amount = np.random.randint(6, 14)
 
-    num_steps = np.random.randint(25, 45)
-
-    cx = width / 2 + np.random.uniform(-width * 0.15, width * 0.15)
-    cy = height / 2 + np.random.uniform(-height * 0.15, height * 0.15)
+    # הקטנת עובי הקרע וההיסט הצידי
+    tear_width = np.random.randint(2, max(3, max_tear_width + 1))
+    shift_amount = np.random.randint(2, 5)
 
     dir_x, dir_y = np.cos(angle_rad), np.sin(angle_rad)
     perp_x, perp_y = -dir_y, dir_x
 
-    t_vals = np.linspace(-img_diag / 2, img_diag / 2, num_steps)
+    cx = width / 2 + np.random.uniform(-width * 0.15, width * 0.15)
+    cy = height / 2 + np.random.uniform(-height * 0.15, height * 0.15)
 
-    # 2. חישוב מסלול מרכזי
-    y_offsets = np.random.uniform(-16, 16, size=num_steps)
-    y_offsets[0] = y_offsets[-1] = 0
+    if is_partial_tear:
+        # קרע שמתחיל בקצה אחד ונעצר באזור המרכז
+        t_start = -img_diag / 2
+        t_end = np.random.uniform(-img_diag * 0.05, img_diag * 0.15)
+        num_steps = np.random.randint(15, 25)
+    else:
+        # קרע מלא מקצה לקצה
+        t_start = -img_diag / 2
+        t_end = img_diag / 2
+        num_steps = np.random.randint(20, 35)
+
+    t_vals = np.linspace(t_start, t_end, num_steps)
+
+    # --------------------------------------------------
+    # 2. חישוב מסלול מרכזי ועובי משתנה (מתינון הזיגזג)
+    # --------------------------------------------------
+    # צמצום הזיגזג מ-[-14, 14] ל-[-4, 4] למסלול ישר ועדין יותר
+    y_offsets = np.random.uniform(-4, 4, size=num_steps)
+    y_offsets[0] = 0
+    if not is_partial_tear:
+        y_offsets[-1] = 0
 
     center_points = []
+    width_factors = []
+
     for i in range(num_steps):
         t = t_vals[i]
         off = y_offsets[i]
@@ -723,9 +730,20 @@ def add_random_heavy_tear(image, max_tear_width=10, add_dark_edge=True):
         py = int(cy + t * dir_y + off * perp_y)
         center_points.append((px, py))
 
+        # חישוב הפחתת עובי (Tapering) לקרע חלקי
+        if is_partial_tear:
+            progress = i / (num_steps - 1)  # 0.0 בתחילה, 1.0 בסוף
+            factor = (1.0 - progress) ** 1.2
+        else:
+            factor = 1.0
+        width_factors.append(factor)
+
+    # --------------------------------------------------
     # 3. הסטת התמונה בצד אחד של השבר
+    # --------------------------------------------------
     split_mask = np.zeros((height, width), dtype=np.uint8)
     poly_pts = [p for p in center_points]
+
     far_p1 = [
         int(center_points[-1][0] + img_diag * perp_x),
         int(center_points[-1][1] + img_diag * perp_y),
@@ -746,7 +764,6 @@ def add_random_heavy_tear(image, max_tear_width=10, add_dark_edge=True):
     )
 
     result = image.copy()
-    is_color = len(image.shape) == 3
     if is_color:
         for c in range(3):
             result[:, :, c] = np.where(
@@ -755,14 +772,18 @@ def add_random_heavy_tear(image, max_tear_width=10, add_dark_edge=True):
     else:
         result = np.where(split_mask == 255, shifted_image, result)
 
-    # 4. בניית מצולע הקרע
+    # --------------------------------------------------
+    # 4. בניית מצולע הקרע (Tear Polygon)
+    # --------------------------------------------------
     top_edge = []
     bottom_edge = []
 
     for i in range(num_steps):
         px, py = center_points[i]
-        w_top = tear_width * np.random.uniform(0.4, 1.1)
-        w_bot = tear_width * np.random.uniform(0.4, 1.1)
+        f = width_factors[i]
+
+        w_top = max(0.8, tear_width * f * np.random.uniform(0.5, 1.1))
+        w_bot = max(0.8, tear_width * f * np.random.uniform(0.5, 1.1))
 
         p_top = (int(px + w_top * perp_x), int(py + w_top * perp_y))
         p_bot = (int(px - w_bot * perp_x), int(py - w_bot * perp_y))
@@ -771,16 +792,17 @@ def add_random_heavy_tear(image, max_tear_width=10, add_dark_edge=True):
         bottom_edge.append(p_bot)
 
     tear_poly = np.array(top_edge + bottom_edge[::-1], dtype=np.int32)
-
     tear_mask = np.zeros((height, width), dtype=np.uint8)
     cv2.fillPoly(tear_mask, [tear_poly], 255)
 
-    # 5. הצללת עומק היקפית
+    # --------------------------------------------------
+    # 5. הצללת עומק היקפית (רדיוס מותאם ל-128x128)
+    # --------------------------------------------------
     res_float = result.astype(np.float32)
     shadow_blur = (
-            cv2.GaussianBlur(tear_mask.astype(np.float32), (29, 29), 0) / 255.0
+        cv2.GaussianBlur(tear_mask.astype(np.float32), (9, 9), 0) / 255.0
     )
-    shadow_factor = 1.0 - (0.42 * shadow_blur)
+    shadow_factor = 1.0 - (0.35 * shadow_blur)
 
     if is_color:
         for c in range(3):
@@ -788,9 +810,11 @@ def add_random_heavy_tear(image, max_tear_width=10, add_dark_edge=True):
     else:
         res_float *= shadow_factor
 
+    # --------------------------------------------------
     # 6. מילוי במרקם הנייר שנחשף
-    paper_base = np.full_like(image, (235, 237, 240), dtype=np.uint8)
-    paper_noise = np.random.normal(0, 6, image.shape).astype(np.int16)
+    # --------------------------------------------------
+    paper_base = np.full_like(image, (238, 240, 242), dtype=np.uint8)
+    paper_noise = np.random.normal(0, 4, image.shape).astype(np.int16)
     paper_textured = np.clip(
         paper_base.astype(np.int16) + paper_noise, 0, 255
     ).astype(np.uint8)
@@ -802,14 +826,55 @@ def add_random_heavy_tear(image, max_tear_width=10, add_dark_edge=True):
     else:
         res_float[mask_bool] = paper_textured[mask_bool]
 
-    # 7. הוספת שכבת ההדגשה הכהה (Dark Edge Outline) בפיקסל הבודד
+    # --------------------------------------------------
+    # 7. אפקט השוליים המפותלים/מקופלים (Curled Paper Flaps)
+    # --------------------------------------------------
+    flap_mask = np.zeros((height, width), dtype=np.float32)
+    cv2.polylines(
+        flap_mask,
+        [np.array(top_edge, dtype=np.int32)],
+        isClosed=False,
+        color=1.0,
+        thickness=2,
+        lineType=cv2.LINE_AA,
+    )
+    cv2.polylines(
+        flap_mask,
+        [np.array(bottom_edge, dtype=np.int32)],
+        isClosed=False,
+        color=1.0,
+        thickness=2,
+        lineType=cv2.LINE_AA,
+    )
+
+    flap_light = cv2.GaussianBlur(flap_mask, (5, 5), 0)
+    flap_shadow = cv2.GaussianBlur(flap_mask, (9, 9), 0)
+
+    # הוספת תאורה בהירה על הנייר המקופל והצללה רכה מתחתיו
+    bright_boost = 1.0 + (0.30 * flap_light)
+    shadow_decay = 1.0 - (0.20 * flap_shadow)
+
+    if is_color:
+        for c in range(3):
+            res_float[:, :, c] = res_float[:, :, c] * shadow_decay * bright_boost
+    else:
+        res_float = res_float * shadow_decay * bright_boost
+
+    # --------------------------------------------------
+    # 8. קו מתאר כהה וחד לשולי הנייר (Dark Edge Outline)
+    # --------------------------------------------------
     if add_dark_edge:
         edge_mask = np.zeros((height, width), dtype=np.float32)
-        # ציור הקו במדויק על ההיקף של המצולע בעובי 1 פיקסל
-        cv2.polylines(edge_mask, [tear_poly], isClosed=True, color=1.0, thickness=1, lineType=cv2.LINE_AA)
+        cv2.polylines(
+            edge_mask,
+            [tear_poly],
+            isClosed=not is_partial_tear,
+            color=1.0,
+            thickness=1,
+            lineType=cv2.LINE_AA,
+        )
 
-        # הכהיה עמוקה בשיעור של 70% רק בפיקסלים של המסגרת
-        edge_dark_factor = 1.0 - (0.70 * edge_mask)
+        edge_dark_factor = 1.0 - (0.50 * edge_mask)
         if is_color:
             for c in range(3):
                 res_float[:, :, c] *= edge_dark_factor
@@ -820,6 +885,239 @@ def add_random_heavy_tear(image, max_tear_width=10, add_dark_edge=True):
 
 
 
+def add_spilled_stain(
+    image, stain_type="coffee", intensity=0.95, skip_probability=0.2
+):
+    """מוסיפה כתם נוזלי שנשפך/נמרח (כמו קפה, תה או שמן) עם אפקט Coffee-Ring
+
+    ונתזים היקפיים.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        תמונת הקלט.
+    stain_type : str
+        סוג הכתם: 'coffee' (קפה/חום), 'tea' (צהבהב/חלודה), 'grease' (שומני/כהה).
+    intensity : float
+        עוצמת הכתם וההכהיה (בין 0.1 ל-1.0).
+    skip_probability : float
+        הסתברות לדילוג ללא שינוי.
+    """
+    if np.random.rand() < skip_probability:
+        return image.copy()
+
+    height, width = image.shape[:2]
+    is_color = len(image.shape) == 3
+    result = image.astype(np.float32)
+
+    # 1. הגדרת מיקום ורדיוס בסיסי
+    cx = int(width * np.random.uniform(0.2, 0.8))
+    cy = int(height * np.random.uniform(0.2, 0.8))
+    base_radius = int(min(width, height) * np.random.uniform(0.08, 0.22))
+
+    # 2. יצירת צורת הכתם המרכזי (אורגני ולא-סימטרי)
+    num_points = np.random.randint(18, 30)
+    angles = np.linspace(0, 2 * np.pi, num_points, endpoint=False)
+    # שינוי אקראי ברדיוס ליצירת גליות
+    radii = base_radius * np.random.uniform(0.5, 1.4, size=num_points)
+
+    pts = []
+    for a, r in zip(angles, radii):
+        px = int(cx + r * np.cos(a))
+        py = int(cy + r * np.sin(a))
+        pts.append([px, py])
+
+    stain_poly = np.array(pts, np.int32)
+
+    # 3. יצירת מסיכות עבור מרכז הכתם ועבור טבעת השוליים (Coffee Ring)
+    mask_fill = np.zeros((height, width), dtype=np.float32)
+    cv2.fillPoly(mask_fill, [stain_poly], 1.0)
+
+    # קו מתאר עבור השוליים הכהים (Coffee Ring Effect)
+    mask_ring = np.zeros((height, width), dtype=np.float32)
+    ring_thickness = int(base_radius * 0.001)
+    cv2.polylines(
+        mask_ring,
+        [stain_poly],
+        isClosed=True,
+        color=1.0,
+        thickness=ring_thickness,
+        lineType=cv2.LINE_AA,
+    )
+
+    # 4. הוספת מריחה כיוונית (Smear Effect) - ב-50% מהמקרים
+    if np.random.rand() < 0.5:
+        smear_angle = np.random.uniform(0, 2 * np.pi)
+        smear_len = int(base_radius * np.random.uniform(0.8, 1.8))
+        smear_end = (
+            int(cx + smear_len * np.cos(smear_angle)),
+            int(cy + smear_len * np.sin(smear_angle)),
+        )
+
+        # ציור המריחה בעובי דועך
+        cv2.line(
+            mask_fill,
+            (cx, cy),
+            smear_end,
+            0.8,
+            thickness=int(base_radius * 0.6),
+            lineType=cv2.LINE_AA,
+        )
+
+    # 5. הוספת נתזים וטיפות קטנות מסביב (Splatters)
+    num_splatters = np.random.randint(8, 20)
+    for _ in range(num_splatters):
+        s_dist = base_radius * np.random.uniform(1.1, 2.2)
+        s_angle = np.random.uniform(0, 2 * np.pi)
+        sx = int(cx + s_dist * np.cos(s_angle))
+        sy = int(cy + s_dist * np.sin(s_angle))
+        s_size = np.random.randint(1, max(2, int(base_radius * 0.08)))
+
+        if 0 <= sx < width and 0 <= sy < height:
+            cv2.circle(mask_fill, (sx, sy), s_size, 0.9, -1)
+
+    # 6. טשטוש רך של המסיכות למעבר הדרגתי
+    blur_k = max(5, int(base_radius * 0.25) | 1)
+    mask_fill_smooth = cv2.GaussianBlur(mask_fill, (blur_k, blur_k), 0)
+    mask_ring_smooth = cv2.GaussianBlur(
+        mask_ring, (max(3, blur_k // 2) | 1, max(3, blur_k // 2) | 1), 0
+    )
+
+    # 7. הגדרת פלטת צבעים/שינוי ערוצים לפי סוג הכתם
+    if is_color:
+        if stain_type == "coffee":
+            # קפה: הורדה חזקה של כחול, הורדה בינונית של ירוק, מעט אדום (חום-כהה)
+            color_factors = [
+                1.0 - (0.65 * intensity),  # B
+                1.0 - (0.42 * intensity),  # G
+                1.0 - (0.22 * intensity),  # R
+            ]
+        elif stain_type == "tea":
+            # תה: גוון צהבהב-כתום קל
+            color_factors = [
+                1.0 - (0.45 * intensity),
+                1.0 - (0.20 * intensity),
+                1.0 - (0.05 * intensity),
+            ]
+        elif stain_type == "white_peel":
+            # הבהרה עוצמתית של כל 3 הערוצים כדי שיהפכו ללבנים
+            color_factor_val = 1.0 + (1.5 * intensity)
+            color_factors = [color_factor_val, color_factor_val, color_factor_val]
+        else:  # grease / dark stain
+            # כתם שומן/לכלוך כהה אחיד
+            factor = 1.0 - (0.50 * intensity)
+            color_factors = [factor, factor, factor]
+
+        # החלת הצבע במרכז הכתם
+        for c in range(3):
+            result[:, :, c] *= 1.0 - (
+                (1.0 - color_factors[c]) * mask_fill_smooth
+            )
+
+        # החלת ה-Coffee Ring (הכהיה נוספת בשוליים)
+        # החלת ה-Coffee Ring (הכהיה נוספת בשוליים)
+        ring_darkening = 1.0 - (0.35 * intensity * mask_ring_smooth)
+        for c in range(3):
+            result[:, :, c] *= ring_darkening
+
+    else:
+        # תמונה בשחור-לבן
+        darkening = 1.0 - (0.45 * intensity * mask_fill_smooth)
+        ring_darkening = 1.0 - (0.30 * intensity * mask_ring_smooth)
+        result *= darkening * ring_darkening
+
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+def add_white_mold_abrasion(image, intensity=0.3, skip_probability=0.2):
+    """מדמה עובש לבן, שחיקה וקילופי אמולסיה בצורה אורגנית וריאליסטית
+
+    (Coherent / Perlin-like Mold Noise)
+    """
+    if np.random.rand() < skip_probability:
+        return image.copy()
+
+    height, width = image.shape[:2]
+    result = image.astype(np.float32)
+
+    # 1. יצירת רעש רציף בתדרים שונים מדמה אשכולות עובש צפופים (Coherent Noise)
+    # מייצרים רשת רעש קטנה ומגדילים אותה עם אינטרפולציה רכה
+    small_h, small_w = max(10, height // 16), max(10, width // 16)
+    low_res_noise1 = np.random.uniform(0, 1, (small_h, small_w)).astype(
+        np.float32
+    )
+    coherent_noise1 = cv2.resize(
+        low_res_noise1, (width, height), interpolation=cv2.INTER_CUBIC
+    )
+
+    # תדר שני למרקם פנימי עדין יותר
+    med_h, med_w = max(20, height // 6), max(20, width // 6)
+    low_res_noise2 = np.random.uniform(0, 1, (med_h, med_w)).astype(np.float32)
+    coherent_noise2 = cv2.resize(
+        low_res_noise2, (width, height), interpolation=cv2.INTER_CUBIC
+    )
+
+    # שילוב התדרים
+    combined_noise = 0.65 * coherent_noise1 + 0.35 * coherent_noise2
+
+    # 2. הגדרת אזורי הכתמים - חיתוך לפי סף אורגני (Thresholding)
+    # ככל ש-intensity גבוה יותר, הכתמים תופסים שטח גדול יותר
+    cutoff = 0.82 - (0.28 * intensity)
+    mold_mask = np.clip((combined_noise - cutoff) / (1.0 - cutoff), 0.0, 1.0)
+
+    # 3. הוספת מרקם גרגירי צפוף בתוך האזורים (Micro-Structure)
+    # יצירת מסיכת חספוס פנימית
+    fine_h, fine_w = max(40, height // 2), max(40, width // 2)
+    fine_noise = cv2.resize(
+        np.random.uniform(0, 1, (fine_h, fine_w)).astype(np.float32),
+        (width, height),
+        interpolation=cv2.INTER_LINEAR,
+    )
+
+    # הכפלת המסיכה האורגנית במרקם הפיזי כדי שהנקודות יהיו צפופות ומחוברות
+    detailed_mold_mask = mold_mask * (0.55 + 0.45 * fine_noise)
+
+    # 4. הוספת פסי שחיקה אנכיים דקים (Vertical Abrasion Streaks)
+    num_streaks = np.random.randint(5, 20)
+    streaks_mask = np.zeros((height, width), dtype=np.float32)
+
+    for _ in range(num_streaks):
+        sx = int(width * np.random.uniform(0.05, 0.95))
+        sy = int(height * np.random.uniform(0.1, 0.7))
+        length = int(height * np.random.uniform(0.1, 0.35))
+
+        ex = sx + np.random.randint(-2, 3)
+        ey = min(height - 1, sy + length)
+
+        cv2.line(
+            streaks_mask,
+            (sx, sy),
+            (ex, ey),
+            1.0,
+            thickness=1,
+            lineType=cv2.LINE_AA,
+        )
+
+    # שחיקה אנכית מופיעה בעיקר באזורי העובש והשוליים
+    streaks_mask *= cv2.GaussianBlur(mold_mask, (15, 15), 0) * 1.2
+    final_mask = np.clip(detailed_mold_mask + streaks_mask, 0.0, 1.0)
+
+    # 5. טשטוש עדין של המסיכה הסופית למעבר טבעי
+    final_mask = cv2.GaussianBlur(final_mask, (3, 3), 0)
+
+    # 6. החלת הצבע הלבן-גרידי (Off-white / Chalky Paper)
+    white_chalk = np.array([242, 245, 238], dtype=np.float32)  # BGR
+
+    if len(image.shape) == 3:
+        for c in range(3):
+            alpha = final_mask * (0.75 + 0.25 * intensity)
+            result[:, :, c] = (result[:, :, c] * (1.0 - alpha)) + (
+                white_chalk[c] * alpha
+            )
+    else:
+        alpha = final_mask * (0.75 + 0.25 * intensity)
+        result = (result * (1.0 - alpha)) + (242.0 * alpha)
+
+    return np.clip(result, 0, 255).astype(np.uint8)
 
 
 
@@ -860,7 +1158,9 @@ def apply_manipulations(image, operations):
         "add_dust_and_flecks":add_dust_and_flecks,
         "add_stain":add_stain,
         "add_blur_stain":add_blur_stain,
-        "add_random_heavy_tear":add_random_heavy_tear
+        "add_random_heavy_tear":add_random_heavy_tear,
+        "add_spilled_stain": add_spilled_stain,
+        "add_white_mold_abrasion": add_white_mold_abrasion
     }
 
     for item in operations:
