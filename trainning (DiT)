@@ -135,7 +135,7 @@ def main() -> None:
 
     model = DiffusionViT(
         image_size=config.image_size,
-        patch_size=4,
+        patch_size=8,
         in_channels=6,
         out_channels=3,
         dim=512,
