@@ -1,448 +1,202 @@
-r"""
-from dataclasses import dataclass
-from pathlib import Path
 import torch
 from torch import nn
-from torch.optim import AdamW
-from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
-from PIL import Image
-from tqdm import tqdm
-import numpy as np
-import cv2
 
-from src.models.diffusion_vit import DiffusionViT
-from olding import PhotoAgingModel
+from .utils import MLP, SinusoidalTimeEmbedding
 
 
-@dataclass
-class TrainConfig:
-    data_dir_clean: str = r"C:\Users\User\Downloads\ffhq_128_70k_images"
-    image_size: int = 128
-    batch_size: int = 16
-    num_workers: int = 4
-    learning_rate: float = 0.5 * 1e-4
-    epochs: int = 30
-    timesteps: int = 50  # <-- עודכן ל-50 צעדי יישון
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+class DiTBlock(nn.Module):
+    """A DiT block with adaptive LayerNorm modulation and residual gating."""
+
+    def __init__(self, dim: int, num_heads: int, mlp_ratio: float = 4.0, dropout: float = 0.0) -> None:
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
+        self.attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
+        self.norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
+        self.mlp = MLP(dim, int(dim * mlp_ratio), dim, dropout=dropout)
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(dim, 6 * dim, bias=True))
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        nn.init.constant_(self.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.adaLN_modulation[-1].bias, 0)
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        shifts_scales_gates = self.adaLN_modulation(cond).chunk(6, dim=-1)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = [
+            params.unsqueeze(1) for params in shifts_scales_gates
+        ]
+
+        h = self.norm1(x) * (1 + scale_msa) + shift_msa
+        h, _ = self.attn(h, h, h, need_weights=False)
+        x = x + gate_msa * h
+
+        h = self.norm2(x) * (1 + scale_mlp) + shift_mlp
+        x = x + gate_mlp * self.mlp(h)
+        return x
 
 
-class ColdDiffusionDataset(Dataset):
-    def __init__(self, clean_dir: str, image_size: int = 128, max_steps: int = 50):
-        self.clean_dir = Path(clean_dir)
-        self.image_size = image_size
-        self.max_steps = max_steps
+class MiniUNetRefiner(nn.Module):
+    """A lightweight U-Net refinement head to smooth out grid artifacts and repair cracks."""
 
-        # אתחול מודל היישון עם 50 צעדים מקסימליים
-        self.aging_model = PhotoAgingModel(image_size=image_size, max_t=max_steps)
+    def __init__(self, channels: int = 3, hidden_dim: int = 32) -> None:
+        super().__init__()
+        # Encoder (Contracting path)
+        self.enc1 = nn.Sequential(
+            nn.Conv2d(channels, hidden_dim, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.SiLU()
+        )
+        self.pool1 = nn.MaxPool2d(2)  # 128 -> 64
 
-        valid_exts = {".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"}
-        self.clean_paths = sorted([
-            p for p in self.clean_dir.glob("*") if p.suffix in valid_exts and p.is_file()
-        ])
+        self.enc2 = nn.Sequential(
+            nn.Conv2d(hidden_dim, hidden_dim * 2, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(hidden_dim * 2, hidden_dim * 2, kernel_size=3, padding=1),
+            nn.SiLU()
+        )
+        self.pool2 = nn.MaxPool2d(2)  # 64 -> 32
 
-        self.transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-        ])
-
-    def __len__(self):
-        return len(self.clean_paths)
-
-    def __getitem__(self, idx):
-        clean_path = self.clean_paths[idx]
-
-        # טעינת התמונה בפורמט RGB ונרמול לטווח [0.0, 1.0] כ-float32
-        clean_img = Image.open(clean_path).convert("RGB")
-        clean_img = clean_img.resize((self.image_size, self.image_size), Image.Resampling.LANCZOS)
-        clean_np = np.array(clean_img).astype(np.float32) / 255.0
-
-        # בחירה אקראית של זמן דיפוזיה t מתוך 50
-        t_val = np.random.randint(1, self.max_steps + 1)
-        prev_t = max(0, t_val - 1)
-
-        # הפעלת fit פעם אחת עבור התמונה הנוכחית
-        self.aging_model.fit(clean_np)
-
-        # רינדור מהיר O(1) בעזרת העברת הפרמטר t בלבד
-        x_t_np = self.aging_model.render(t=t_val)
-        x_prev_np = self.aging_model.render(t=prev_t)
-        y_deg_np = self.aging_model.render(t=self.max_steps)
-
-        # המרה בחזרה ל-PIL Image לצורך מעבר דרך ה-transforms
-        x_t_img = Image.fromarray((np.clip(x_t_np, 0, 1) * 255).astype(np.uint8))
-        x_prev_img = Image.fromarray((np.clip(x_prev_np, 0, 1) * 255).astype(np.uint8))
-        y_deg_img = Image.fromarray((np.clip(y_deg_np, 0, 1) * 255).astype(np.uint8))
-
-        return (
-            self.transform(x_t_img),
-            self.transform(x_prev_img),
-            self.transform(y_deg_img),
-            torch.tensor(t_val, dtype=torch.long)
+        # Bottleneck
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(hidden_dim * 2, hidden_dim * 4, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(hidden_dim * 4, hidden_dim * 2, kernel_size=3, padding=1),
+            nn.SiLU()
         )
 
-
-def save_aging_preview(config: TrainConfig, num_samples: int = 3, step_interval: int = 10):
-    print("Generating aging progression preview samples (50 steps)...")
-    clean_dir = Path(config.data_dir_clean)
-    valid_exts = {".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"}
-    clean_paths = sorted([p for p in clean_dir.glob("*") if p.suffix in valid_exts and p.is_file()])
-
-    if not clean_paths:
-        print("No clean images found for preview generation.")
-        return
-
-    preview_dir = Path("aging_previews")
-    preview_dir.mkdir(parents=True, exist_ok=True)
-
-    aging_model = PhotoAgingModel(image_size=config.image_size, max_t=config.timesteps)
-
-    # בחירת צעדי הזמן להצגה בקפיצות של 10 (0, 10, 20, 30, 40, 50)
-    step_indices = list(range(0, config.timesteps + 1, step_interval))
-    if config.timesteps not in step_indices:
-        step_indices.append(config.timesteps)
-
-    actual_samples = min(num_samples, len(clean_paths))
-    for i in range(actual_samples):
-        img_path = clean_paths[i]
-        clean_img = Image.open(img_path).convert("RGB")
-        clean_img = clean_img.resize((config.image_size, config.image_size), Image.Resampling.LANCZOS)
-        clean_np = np.array(clean_img).astype(np.float32) / 255.0
-
-        aging_model.fit(clean_np, seed=42 + i)
-
-        rendered_tiles = []
-        for t in step_indices:
-            t_np = aging_model.render(t=t)
-            t_img = Image.fromarray((np.clip(t_np, 0, 1) * 255).astype(np.uint8))
-            rendered_tiles.append(t_img)
-
-        w, h = config.image_size, config.image_size
-        combined_img = Image.new("RGB", (w * len(rendered_tiles), h))
-        for idx, tile in enumerate(rendered_tiles):
-            combined_img.paste(tile, (idx * w, 0))
-
-        save_path = preview_dir / f"aging_progression_sample_{i+1}.png"
-        combined_img.save(save_path)
-        print(f"Saved aging progression preview to: {save_path}")
-    print(f"Previews saved successfully in '{preview_dir.resolve()}' folder.\n")
-
-
-def build_dataloader(config: TrainConfig) -> DataLoader:
-    dataset = ColdDiffusionDataset(
-        clean_dir=config.data_dir_clean,
-        image_size=config.image_size,
-        max_steps=config.timesteps
-    )
-    return DataLoader(
-        dataset,
-        batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=config.num_workers,
-        pin_memory=True,
-        drop_last=True
-    )
-
-
-def train_one_epoch(
-        model: nn.Module,
-        dataloader: DataLoader,
-        optimizer: torch.optim.Optimizer,
-        scaler: torch.amp.GradScaler,
-        config: TrainConfig,
-        epoch: int,
-) -> float:
-    model.train()
-    running_loss = 0.0
-
-    pbar = tqdm(dataloader, desc=f"Epoch {epoch}/{config.epochs}")
-    for x_t, x_prev, degraded_images, timesteps in pbar:
-        x_t = x_t.to(config.device, non_blocking=True)
-        x_prev = x_prev.to(config.device, non_blocking=True)
-        degraded_images = degraded_images.to(config.device, non_blocking=True)
-        timesteps = timesteps.to(config.device, non_blocking=True)
-
-        model_input = torch.cat([degraded_images, x_t], dim=1)
-
-        optimizer.zero_grad(set_to_none=True)
-
-        use_amp = config.device == "cuda"
-        with torch.amp.autocast('cuda', enabled=use_amp):
-            predictions = model(model_input, timesteps)
-            loss = torch.nn.functional.mse_loss(predictions, x_prev)
-
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        scaler.step(optimizer)
-        scaler.update()
-
-        running_loss += loss.item()
-        pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
-
-    return running_loss / max(len(dataloader), 1)
-
-
-def main() -> None:
-    config = TrainConfig()
-    print(f"Using device: {config.device}")
-
-    if config.device == "cuda":
-        torch.set_float32_matmul_precision('high')
-
-    # יצירת תצוגה מקדימה של 50 צעדים (בקפיצות של 10) לפני האימון
-    save_aging_preview(config, num_samples=3, step_interval=10)
-
-    model = DiffusionViT(
-        image_size=config.image_size,
-        patch_size=8,
-        in_channels=6,
-        out_channels=3,
-        dim=512,
-        depth=8,
-        num_heads=8
-    ).to(config.device)
-
-    optimizer = AdamW(model.parameters(), lr=config.learning_rate, weight_decay=1e-2)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.epochs, eta_min=1e-6)
-    scaler = torch.amp.GradScaler('cuda', enabled=(config.device == "cuda"))
-
-    dataloader = build_dataloader(config)
-    print(f"Loaded {len(dataloader.dataset)} clean images. Starting staggered probabilistic chaining training (50 steps)...")
-
-    for epoch in range(1, config.epochs + 1):
-        loss = train_one_epoch(model, dataloader, optimizer, scaler, config, epoch)
-        scheduler.step()
-        print(f"Epoch {epoch}/{config.epochs} Complete - Loss: {loss:.6f}")
-
-        if epoch % 3 == 0 or epoch == config.epochs:
-            torch.save(model.state_dict(), f"dit_cold_diffusion_epoch_{epoch}.pth")
-
-
-if __name__ == "__main__":
-    main()
-"""
-
-from dataclasses import dataclass
-from pathlib import Path
-import torch
-from torch import nn
-from torch.optim import AdamW
-from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
-from PIL import Image
-from tqdm import tqdm
-import numpy as np
-import cv2
-
-from src.models.diffusion_vit import DiffusionViT
-from olding import PhotoAgingModel
-
-
-@dataclass
-class TrainConfig:
-    data_dir_clean: str = r"C:\Users\User\Downloads\ffhq_128_70k_images"
-    image_size: int = 128
-    batch_size: int = 16
-    num_workers: int = 4
-    learning_rate: float = 0.03 * 1e-4
-    epochs: int = 30
-    start_epoch: int = 7  # <-- שנו ל-4 (או לאפיק הבא אחרי האחרון שנשמר)
-    timesteps: int = 50
-    resume_checkpoint: str = "dit_cold_diffusion_epoch_6.pth"  # <-- הכניסו לכאן את שם הקובץ האחרון שנשמר
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
-
-
-class ColdDiffusionDataset(Dataset):
-    def __init__(self, clean_dir: str, image_size: int = 128, max_steps: int = 50):
-        self.clean_dir = Path(clean_dir)
-        self.image_size = image_size
-        self.max_steps = max_steps
-
-        self.aging_model = PhotoAgingModel(image_size=image_size, max_t=max_steps)
-
-        valid_exts = {".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"}
-        self.clean_paths = sorted([
-            p for p in self.clean_dir.glob("*") if p.suffix in valid_exts and p.is_file()
-        ])
-
-        self.transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-        ])
-
-    def __len__(self):
-        return len(self.clean_paths)
-
-    def __getitem__(self, idx):
-        clean_path = self.clean_paths[idx]
-
-        clean_img = Image.open(clean_path).convert("RGB")
-        clean_img = clean_img.resize((self.image_size, self.image_size), Image.Resampling.LANCZOS)
-        clean_np = np.array(clean_img).astype(np.float32) / 255.0
-
-        t_val = np.random.randint(1, self.max_steps + 1)
-        prev_t = max(0, t_val - 1)
-
-        self.aging_model.fit(clean_np)
-
-        x_t_np = self.aging_model.render(t=t_val)
-        x_prev_np = self.aging_model.render(t=prev_t)
-        y_deg_np = self.aging_model.render(t=self.max_steps)
-
-        x_t_img = Image.fromarray((np.clip(x_t_np, 0, 1) * 255).astype(np.uint8))
-        x_prev_img = Image.fromarray((np.clip(x_prev_np, 0, 1) * 255).astype(np.uint8))
-        y_deg_img = Image.fromarray((np.clip(y_deg_np, 0, 1) * 255).astype(np.uint8))
-
-        return (
-            self.transform(x_t_img),
-            self.transform(x_prev_img),
-            self.transform(y_deg_img),
-            torch.tensor(t_val, dtype=torch.long)
+        # Decoder (Expanding path) with Skip Connections
+        self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.dec2 = nn.Sequential(
+            nn.Conv2d(hidden_dim * 4, hidden_dim * 2, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(hidden_dim * 2, hidden_dim, kernel_size=3, padding=1),
+            nn.SiLU()
         )
 
+        self.up1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.dec1 = nn.Sequential(
+            nn.Conv2d(hidden_dim * 2, hidden_dim, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(hidden_dim, channels, kernel_size=3, padding=1)
+        )
 
-def save_aging_preview(config: TrainConfig, num_samples: int = 3, step_interval: int = 10):
-    print("Generating aging progression preview samples (50 steps)...")
-    clean_dir = Path(config.data_dir_clean)
-    valid_exts = {".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"}
-    clean_paths = sorted([p for p in clean_dir.glob("*") if p.suffix in valid_exts and p.is_file()])
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Encoder
+        e1 = self.enc1(x)
+        p1 = self.pool1(e1)
 
-    if not clean_paths:
-        print("No clean images found for preview generation.")
-        return
+        e2 = self.enc2(p1)
+        p2 = self.pool2(e2)
 
-    preview_dir = Path("aging_previews")
-    preview_dir.mkdir(parents=True, exist_ok=True)
+        # Bottleneck
+        b = self.bottleneck(p2)
 
-    aging_model = PhotoAgingModel(image_size=config.image_size, max_t=config.timesteps)
+        # Decoder with Skip Connections
+        u2 = self.up2(b)
+        cat2 = torch.cat([u2, e2], dim=1)
+        d2 = self.dec2(cat2)
 
-    step_indices = list(range(0, config.timesteps + 1, step_interval))
-    if config.timesteps not in step_indices:
-        step_indices.append(config.timesteps)
+        u1 = self.up1(d2)
+        cat1 = torch.cat([u1, e1], dim=1)
+        out = self.dec1(cat1)
 
-    actual_samples = min(num_samples, len(clean_paths))
-    for i in range(actual_samples):
-        img_path = clean_paths[i]
-        clean_img = Image.open(img_path).convert("RGB")
-        clean_img = clean_img.resize((config.image_size, config.image_size), Image.Resampling.LANCZOS)
-        clean_np = np.array(clean_img).astype(np.float32) / 255.0
-
-        aging_model.fit(clean_np, seed=42 + i)
-
-        rendered_tiles = []
-        for t in step_indices:
-            t_np = aging_model.render(t=t)
-            t_img = Image.fromarray((np.clip(t_np, 0, 1) * 255).astype(np.uint8))
-            rendered_tiles.append(t_img)
-
-        w, h = config.image_size, config.image_size
-        combined_img = Image.new("RGB", (w * len(rendered_tiles), h))
-        for idx, tile in enumerate(rendered_tiles):
-            combined_img.paste(tile, (idx * w, 0))
-
-        save_path = preview_dir / f"aging_progression_sample_{i+1}.png"
-        combined_img.save(save_path)
-    print(f"Previews saved successfully in '{preview_dir.resolve()}' folder.\n")
+        return out
 
 
-def build_dataloader(config: TrainConfig) -> DataLoader:
-    dataset = ColdDiffusionDataset(
-        clean_dir=config.data_dir_clean,
-        image_size=config.image_size,
-        max_steps=config.timesteps
-    )
-    return DataLoader(
-        dataset,
-        batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=config.num_workers,
-        pin_memory=True,
-        drop_last=True
-    )
+class DiffusionViT(nn.Module):
+    """A DiT-style denoiser with per-block adaptive timestep conditioning and Mini-UNet refinement head."""
 
+    def __init__(
+            self,
+            image_size: int = 128,
+            patch_size: int = 8,
+            in_channels: int = 6,
+            out_channels: int = 3,
+            dim: int = 512,
+            depth: int = 8,
+            num_heads: int = 8,
+    ) -> None:
+        super().__init__()
+        if image_size % patch_size != 0:
+            raise ValueError("image_size must be divisible by patch_size")
 
-def train_one_epoch(
-        model: nn.Module,
-        dataloader: DataLoader,
-        optimizer: torch.optim.Optimizer,
-        scaler: torch.amp.GradScaler,
-        config: TrainConfig,
-        epoch: int,
-) -> float:
-    model.train()
-    running_loss = 0.0
+        self.patch_size = patch_size
+        self.grid_size = image_size // patch_size
+        self.num_patches = self.grid_size ** 2
+        self.in_channels = in_channels
+        self.out_channels = out_channels
 
-    pbar = tqdm(dataloader, desc=f"Epoch {epoch}/{config.epochs}")
-    for x_t, x_prev, degraded_images, timesteps in pbar:
-        x_t = x_t.to(config.device, non_blocking=True)
-        x_prev = x_prev.to(config.device, non_blocking=True)
-        degraded_images = degraded_images.to(config.device, non_blocking=True)
-        timesteps = timesteps.to(config.device, non_blocking=True)
+        self.in_patch_dim = in_channels * patch_size * patch_size
+        self.out_patch_dim = out_channels * patch_size * patch_size
 
-        model_input = torch.cat([degraded_images, x_t], dim=1)
+        self.patch_embed = nn.Linear(self.in_patch_dim, dim)
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, dim))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
-        optimizer.zero_grad(set_to_none=True)
+        self.time_embed = nn.Sequential(
+            SinusoidalTimeEmbedding(dim),
+            nn.Linear(dim, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim),
+        )
 
-        use_amp = config.device == "cuda"
-        with torch.amp.autocast('cuda', enabled=use_amp):
-            predictions = model(model_input, timesteps)
-            loss = torch.nn.functional.mse_loss(predictions, x_prev)
+        self.blocks = nn.ModuleList([DiTBlock(dim, num_heads) for _ in range(depth)])
+        self.final_norm = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
+        self.final_adaLN = nn.Sequential(nn.SiLU(), nn.Linear(dim, 2 * dim, bias=True))
 
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        scaler.step(optimizer)
-        scaler.update()
+        # Linear head producing the discrete patches
+        self.head = nn.Linear(dim, self.out_patch_dim, bias=True)
 
-        running_loss += loss.item()
-        pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
+        # --- MINI U-NET REFINEMENT HEAD ---
+        self.unet_head = MiniUNetRefiner(channels=self.out_channels, hidden_dim=32)
 
-    return running_loss / max(len(dataloader), 1)
+        self._init_final_layer()
 
+    def _init_final_layer(self) -> None:
+        nn.init.constant_(self.final_adaLN[-1].weight, 0)
+        nn.init.constant_(self.final_adaLN[-1].bias, 0)
 
-def main() -> None:
-    config = TrainConfig()
-    print(f"Using device: {config.device}")
+        nn.init.constant_(self.head.weight, 0)
+        nn.init.constant_(self.head.bias, 0)
 
-    if config.device == "cuda":
-        torch.set_float32_matmul_precision('high')
+        # Zero-initialization for the final U-Net layer to start as identity mapping
+        final_conv = self.unet_head.dec1[-1]
+        nn.init.constant_(final_conv.weight, 0)
+        nn.init.constant_(final_conv.bias, 0)
 
-    save_aging_preview(config, num_samples=3, step_interval=10)
+    def _to_patches(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, h, w = x.shape
+        p = self.patch_size
+        x = x.view(b, c, h // p, p, w // p, p)
+        x = x.permute(0, 2, 4, 3, 5, 1).contiguous()
+        return x.view(b, -1, self.in_patch_dim)
 
-    model = DiffusionViT(
-        image_size=config.image_size,
-        patch_size=8,
-        in_channels=6,
-        out_channels=3,
-        dim=512,
-        depth=8,
-        num_heads=8
-    ).to(config.device)
+    def _from_patches(self, patches: torch.Tensor) -> torch.Tensor:
+        b = patches.shape[0]
+        p = self.patch_size
+        g = self.grid_size
+        c = self.out_channels
+        x = patches.view(b, g, g, p, p, c)
+        x = x.permute(0, 5, 1, 3, 2, 4).contiguous()
+        return x.view(b, c, g * p, g * p)
 
-    # טעינת המשקולות מקובץ קיים אם הוגדר ונמצא
-    if config.resume_checkpoint and Path(config.resume_checkpoint).exists():
-        print(f"Loading checkpoint weights from: {config.resume_checkpoint}")
-        model.load_state_dict(torch.load(config.resume_checkpoint, map_location=config.device))
-    else:
-        print("No checkpoint found or specified. Starting training from scratch.")
+    def forward(self, x: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
+        patches = self._to_patches(x)
+        tokens = self.patch_embed(patches) + self.pos_embed
+        time_cond = self.time_embed(timesteps)
 
-    optimizer = AdamW(model.parameters(), lr=config.learning_rate, weight_decay=1e-2)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.epochs, eta_min=1e-6)
-    scaler = torch.amp.GradScaler('cuda', enabled=(config.device == "cuda"))
+        for block in self.blocks:
+            tokens = block(tokens, time_cond)
 
-    dataloader = build_dataloader(config)
-    print(f"Loaded {len(dataloader.dataset)} clean images. Resuming training from epoch {config.start_epoch}...")
+        shift, scale = [params.unsqueeze(1) for params in self.final_adaLN(time_cond).chunk(2, dim=-1)]
+        tokens = self.final_norm(tokens) * (1 + scale) + shift
 
-    # הרצת האימון מהאפיק המוגדר ועד לסוף
-    for epoch in range(config.start_epoch, config.epochs + 1):
-        loss = train_one_epoch(model, dataloader, optimizer, scaler, config, epoch)
-        scheduler.step()
-        print(f"Epoch {epoch}/{config.epochs} Complete - Loss: {loss:.6f}")
+        # 1. Project to discrete patches and reconstruct image
+        patches = self.head(tokens)
+        img_discrete = self._from_patches(patches)
 
-        if epoch % 3 == 0 or epoch == config.epochs:
-            torch.save(model.state_dict(), f"dit_cold_diffusion_epoch_{epoch}.pth")
+        # 2. Refine using Mini U-Net with a residual connection
+        refined_img = img_discrete + self.unet_head(img_discrete)
 
-
-if __name__ == "__main__":
-    main()
+        return refined_img
