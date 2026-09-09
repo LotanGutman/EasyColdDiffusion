@@ -20,25 +20,24 @@ EasyColdDiffusion/
 │   │   ├── dit_dataset.py    # Paired dataset loader (DiT)
 │   │   ├── download_coco.py  # COCO dataset downloader
 │   │   └── create_dataset.py # 128x128 center crop & resize pipeline
+│   ├── gui/                  # Interactive Tkinter restoration studio
+│   │   └── app.py            # Drag-and-drop, paste & live restoration GUI
 │   ├── models/               # Model architectures
 │   │   ├── unet.py           # Time-conditioned U-Net restoration model
 │   │   ├── diffusion_vit.py  # Diffusion Vision Transformer (DiT)
+│   │   ├── step_estimator.py # Lightweight damage & step budget neural estimator
 │   │   └── utils/            # Shared embedding & layer blocks
 │   ├── training/             # Training routines
 │   │   ├── train_unet.py     # U-Net Cold Diffusion trainer (Cosine Warmup)
-│   │   └── train_dit.py      # DiT trainer
+│   │   ├── train_dit.py      # DiT trainer
+│   │   └── train_estimator.py# Step & degradation estimator trainer
 │   ├── infer/                # Inference & evaluation
 │   │   ├── infer_unet.py     # U-Net evaluation & multi-step visualizer
-│   │   └── infer_dit.py      # DiT tiled reconstruction with Hann window blending
+│   │   ├── infer_dit.py      # DiT tiled reconstruction with Hann window blending
+│   │   └── convergence.py    # Cauchy closed-loop convergence monitor
 │   ├── operations.py         # Degradation operators (sepia, cracks, stains, tears)
 │   └── operations_main.py    # Offline dataset degradation generator
-├── aging_gui.py              # Interactive Tkinter GUI for continuous aging preview
-├── train_unet.py             # Entry point: Train U-Net model
-├── train_dit.py              # Entry point: Train DiT model
-├── test_unet.py              # Entry point: Test & restore images with U-Net
-├── infer_dit.py              # Entry point: Restore images with DiT
-├── download_coco.py          # Entry point: Download raw COCO images
-├── create_dataset.py         # Entry point: Crop and prepare clean dataset
+├── main.py                   # Unified CLI & GUI entry point
 ├── trained_model.pth         # Pretrained U-Net weights
 ├── requirements.txt          # Python dependencies
 └── install.sh                # Setup script
@@ -74,10 +73,11 @@ EasyColdDiffusion/
 
 ## 🚀 Usage Guide
 
-### 1. Interactive Aging Degradation GUI
-Launch the visual degradation tool to experiment with real-time continuous degradation (sepia tone, paper grain, scratch dilation):
+### 1. Interactive Aging & Restoration Studio (GUI)
+Launch the visual degradation and real-time restoration tool (supports drag & drop, clipboard paste `Ctrl+V`, texture selection, and instant U-Net restoration):
 ```bash
-python aging_gui.py
+python main.py
+# or: python main.py gui
 ```
 
 ---
@@ -87,23 +87,23 @@ python aging_gui.py
 #### Test Pretrained U-Net Model:
 Run restoration on sample test images and save comparison figures to `results/`:
 ```bash
-python test_unet.py --checkpoint trained_model.pth --num_samples 5 --output_dir results
+python main.py test-unet --checkpoint trained_model.pth --num_samples 5 --output_dir results
 ```
 To view interactive matplotlib windows directly:
 ```bash
-python test_unet.py --show
+python main.py test-unet --show
 ```
 
 #### Train U-Net from Scratch:
 ```bash
 # Step 1: Download COCO raw images
-python download_coco.py --output_dir data/coco_raw_train2017 --max_images 30000
+python main.py download-coco --output_dir data/coco_raw_train2017 --max_images 30000
 
 # Step 2: Prepare 128x128 clean training set
-python create_dataset.py --raw_dir data/coco_raw_train2017 --clean_dir data/coco_128_clean
+python main.py create-dataset --raw_dir data/coco_raw_train2017 --clean_dir data/coco_128_clean
 
 # Step 3: Run training
-python train_unet.py --clean_dir data/coco_128_clean --epochs 40 --batch_size 16
+python main.py train-unet --clean_dir data/coco_128_clean --epochs 40 --batch_size 16
 ```
 
 ---
@@ -112,13 +112,25 @@ python train_unet.py --clean_dir data/coco_128_clean --epochs 40 --batch_size 16
 
 #### Train DiT Model:
 ```bash
-python train_dit.py --clean_dir data/clean --degraded_dir data/degraded --epochs 30 --batch_size 64
+python main.py train-dit --clean_dir data/clean --degraded_dir data/degraded --epochs 30 --batch_size 64
 ```
 
 #### Run DiT Inference with Tiling & Hann Window Blending:
 ```bash
-python infer_dit.py --checkpoint checkpoints/dit_cold_diffusion_epoch_6.pth --input_dir data/degraded --output_dir results/dit_restored
+python main.py infer-dit --checkpoint checkpoints/dit_cold_diffusion_epoch_6.pth --input_dir data/degraded --output_dir results/dit_restored
 ```
+
+---
+
+### 4. Step & Convergence Estimator (Architecture-Agnostic)
+
+An intelligent hybrid system combining **Instance-Level Neural Prediction** (predicting damage severity $t \in [0, 100]$ and step budget $K \in [1, 20]$) and a **Closed-Loop Cauchy Convergence Monitor** ($\Delta_k = \frac{\|x^{(k)} - x^{(k-1)}\|_2}{\|x^{(k-1)}\|_2 + \epsilon} < \tau$) for early termination. Compatible with both U-Net and DiT backbones.
+
+#### Train the Step Estimator:
+```bash
+python main.py train-estimator --epochs 10 --batch_size 64
+```
+The resulting checkpoint is saved to `checkpoints/step_estimator.pth` and automatically loaded by the interactive GUI.
 
 ---
 
@@ -127,3 +139,8 @@ python infer_dit.py --checkpoint checkpoints/dit_cold_diffusion_epoch_6.pth --in
 - **Recursive Degradation:** Micro-step compounding sepia matrix transforms, paper texture multi-layering, and morphological scratch dilation.
 - **U-Net Architecture:** Multi-scale encoder-decoder network with sinusoidal time embeddings and skip connections for high-fidelity reconstruction.
 - **DiT Architecture:** Vision Transformer operating over image patches with adaptive LayerNorm (`adaLN`) modulation and Hann window overlap blending for large images.
+- **Adaptive Convergence Estimation:**
+  - *Neural Estimator (`StepAndDegradationEstimator`):* Lightweight 4-stage convolutional encoder + dual-head regression (~180k parameters, <2ms GPU latency) predicting degradation timestep $t^*$ and recommended multi-pass budget $K^*$.
+  - *Cauchy Convergence Monitor (`CauchyConvergenceMonitor`):* Tracks successive reconstruction residual norms on-the-fly and detects plateau/inflection to halt sampling early, reducing compute overhead while preventing over-smoothing.
+
+
