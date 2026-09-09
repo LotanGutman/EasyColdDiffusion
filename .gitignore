@@ -1,0 +1,31 @@
+# Python & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+
+# Datasets & Downloads
+data/
+*.zip
+*.tar.gz
+
+# Checkpoints (except pretrained model if desired)
+checkpoints/
+*.pth
+!trained_model.pth
+
+# Results
+results/
+aging_previews/

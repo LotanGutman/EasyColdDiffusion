@@ -1,6 +1,6 @@
 """Model package exports for EasyColdDiffusion."""
 
 from .diffusion_vit import DiffusionViT
-from .unet import ColdDiffusionUNet
+from .unet import ColdDiffusionUNet, UNet
 
-__all__ = ["ColdDiffusionUNet", "DiffusionViT"]
+__all__ = ["ColdDiffusionUNet", "DiffusionViT", "UNet"]
