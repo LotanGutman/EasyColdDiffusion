@@ -61,6 +61,8 @@ class ColdDiffusionGUI:
         self.paper_texture = None
         self.scratch_texture = None
         self.auto_restore_timer = None
+        self.is_real_photo_mode = True
+
 
         # Convergence & Step Estimator Setup
         self.estimator_path = os.path.join(PROJECT_ROOT, "checkpoints", "step_estimator.pth")
@@ -214,7 +216,20 @@ class ColdDiffusionGUI:
         deg_box = tk.Frame(row2, bg="#333842", padx=8, pady=6, relief=tk.GROOVE, bd=1)
         deg_box.pack(side=tk.LEFT, fill=tk.BOTH, padx=(0, 8))
 
-        tk.Label(deg_box, text="Aging Degradation:", font=("Segoe UI", 8, "bold"), fg="#e5c07b", bg="#333842").pack(anchor=tk.W)
+        mode_hdr = tk.Frame(deg_box, bg="#333842")
+        mode_hdr.pack(fill=tk.X, pady=(0, 3))
+
+        self.btn_mode_real = tk.Button(
+            mode_hdr, text="🏛️ Real Old Photo", command=self.set_real_photo_mode,
+            bg="#61afef", fg="#1e1e24", font=("Segoe UI", 8, "bold"), relief=tk.RAISED, padx=6
+        )
+        self.btn_mode_real.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.btn_mode_sim = tk.Button(
+            mode_hdr, text="🧪 Simulate Aging", command=self.set_simulate_mode,
+            bg="#3e4451", fg="#abb2bf", font=("Segoe UI", 8), relief=tk.GROOVE, padx=6
+        )
+        self.btn_mode_sim.pack(side=tk.LEFT)
 
         opts_frame = tk.Frame(deg_box, bg="#333842")
         opts_frame.pack(fill=tk.X, pady=2)
@@ -222,25 +237,23 @@ class ColdDiffusionGUI:
         self.use_paper_var = tk.BooleanVar(value=True)
         self.use_scratch_var = tk.BooleanVar(value=True)
 
-        tk.Checkbutton(
+        self.chk_paper = tk.Checkbutton(
             opts_frame, text="Paper", variable=self.use_paper_var, command=self._on_toggle_aging,
             bg="#333842", fg="#e0e0e0", selectcolor="#1e1e24", activebackground="#333842", font=("Segoe UI", 8)
-        ).pack(side=tk.LEFT, padx=2)
+        )
+        self.chk_paper.pack(side=tk.LEFT, padx=2)
 
-        tk.Checkbutton(
+        self.chk_scratch = tk.Checkbutton(
             opts_frame, text="Scratches", variable=self.use_scratch_var, command=self._on_toggle_aging,
             bg="#333842", fg="#e0e0e0", selectcolor="#1e1e24", activebackground="#333842", font=("Segoe UI", 8)
-        ).pack(side=tk.LEFT, padx=2)
+        )
+        self.chk_scratch.pack(side=tk.LEFT, padx=2)
 
-        tk.Button(
+        self.btn_rand_tex = tk.Button(
             opts_frame, text="🎲 Textures", command=self.randomize_textures,
             bg="#5c6370", fg="#ffffff", font=("Segoe UI", 7), relief=tk.GROOVE, padx=4
-        ).pack(side=tk.LEFT, padx=4)
-
-        tk.Button(
-            opts_frame, text="➡️ Direct", command=self.use_as_direct_input,
-            bg="#4b5263", fg="#ffffff", font=("Segoe UI", 7), relief=tk.GROOVE, padx=4
-        ).pack(side=tk.LEFT, padx=(0, 2))
+        )
+        self.btn_rand_tex.pack(side=tk.LEFT, padx=4)
 
         tk.Button(
             opts_frame, text="⚡ Auto-Detect", command=lambda: self.estimate_and_apply_current(update_t=True),
@@ -253,9 +266,11 @@ class ColdDiffusionGUI:
 
         slider_hdr = tk.Frame(slider_box, bg="#333842")
         slider_hdr.pack(fill=tk.X)
-        tk.Label(slider_hdr, text="Degradation / Timestep (t):", font=("Segoe UI", 8, "bold"), fg="#61afef", bg="#333842").pack(side=tk.LEFT)
+        self.lbl_t_title = tk.Label(slider_hdr, text="Restoration Severity (t):", font=("Segoe UI", 8, "bold"), fg="#61afef", bg="#333842")
+        self.lbl_t_title.pack(side=tk.LEFT)
         self.lbl_t_val = tk.Label(slider_hdr, text="50", font=("Segoe UI", 8, "bold"), fg="#98c379", bg="#333842")
         self.lbl_t_val.pack(side=tk.RIGHT)
+
 
         self.t_slider = tk.Scale(
             slider_box, from_=0, to=100, orient=tk.HORIZONTAL, bg="#282830", fg="#abb2bf",
@@ -492,9 +507,18 @@ class ColdDiffusionGUI:
         self.canvas_rest.image = None
         self.restored_image_pil = None
 
-        # Re-apply current slider degradation
-        self.apply_aging_slider()
+        if self.is_real_photo_mode:
+            self.degraded_image_pil = self.loaded_image_pil.copy()
+            self.display_on_canvas(self.degraded_image_pil, self.canvas_deg)
+            # Automatically detect real photo's damage level and set optimal t
+            self.estimate_and_apply_current(self.degraded_image_pil, update_t=True)
+        else:
+            # Re-apply current slider degradation
+            self.apply_aging_slider()
+            self.schedule_auto_restore(delay_ms=100)
+
         self.set_status(f"Loaded: {source} (128x128)")
+
 
     def schedule_auto_restore(self, delay_ms: int = 350):
         """Debounced automatic restoration trigger."""
@@ -562,17 +586,38 @@ class ColdDiffusionGUI:
         self.schedule_auto_restore(delay_ms=100)
 
 
-    def use_as_direct_input(self):
-        if self.loaded_image_pil is None:
-            self.set_status("Load an image first!", error=True)
-            return
-        self.degraded_image_pil = self.loaded_image_pil.copy()
-        self.display_on_canvas(self.degraded_image_pil, self.canvas_deg)
-        if self.auto_estimate_var.get():
-            self.estimate_and_apply_current(self.degraded_image_pil, update_t=True)
-        else:
-            self.set_status("Input passed directly to Model Input (No artificial aging).")
+    def set_real_photo_mode(self):
+        self.is_real_photo_mode = True
+        self.btn_mode_real.config(bg="#61afef", fg="#1e1e24", relief=tk.RAISED)
+        self.btn_mode_sim.config(bg="#3e4451", fg="#abb2bf", relief=tk.GROOVE)
+        self.lbl_t_title.config(text="Restoration Severity (t):")
+        self.chk_paper.config(state=tk.DISABLED)
+        self.chk_scratch.config(state=tk.DISABLED)
+        self.btn_rand_tex.config(state=tk.DISABLED)
+
+        if self.loaded_image_pil is not None:
+            self.degraded_image_pil = self.loaded_image_pil.copy()
+            self.display_on_canvas(self.degraded_image_pil, self.canvas_deg)
+            if self.t_slider.get() < 5:
+                self.estimate_and_apply_current(self.degraded_image_pil, update_t=True)
+            else:
+                self.schedule_auto_restore(delay_ms=50)
+        self.set_status("Mode: 🏛️ Real Old Photo. Moving slider (t) controls restoration strength without adding fake noise.")
+
+    def set_simulate_mode(self):
+        self.is_real_photo_mode = False
+        self.btn_mode_sim.config(bg="#61afef", fg="#1e1e24", relief=tk.RAISED)
+        self.btn_mode_real.config(bg="#3e4451", fg="#abb2bf", relief=tk.GROOVE)
+        self.lbl_t_title.config(text="Degradation Timestep (t):")
+        self.chk_paper.config(state=tk.NORMAL)
+        self.chk_scratch.config(state=tk.NORMAL)
+        self.btn_rand_tex.config(state=tk.NORMAL)
+        self.apply_aging_slider()
         self.schedule_auto_restore(delay_ms=100)
+        self.set_status("Mode: 🧪 Simulate Aging. Moving slider (t) artificially ages the image with paper and scratches.")
+
+    def use_as_direct_input(self):
+        self.set_real_photo_mode()
 
     def estimate_and_apply_current(self, target_pil=None, update_t: bool = True):
         """Analyze current image and update t and/or step sliders using Estimator/Heuristic."""
@@ -632,11 +677,18 @@ class ColdDiffusionGUI:
         if self.loaded_image_pil is None:
             return
 
+        if self.is_real_photo_mode:
+            # In Real Old Photo mode: model input is the loaded real photo directly!
+            self.degraded_image_pil = self.loaded_image_pil.copy()
+            self.display_on_canvas(self.degraded_image_pil, self.canvas_deg)
+            return
+
         t = int(self.t_slider.get())
         if t == 0:
             self.degraded_image_pil = self.loaded_image_pil.copy()
             self.display_on_canvas(self.degraded_image_pil, self.canvas_deg)
             return
+
 
         x_0 = np.array(self.loaded_image_pil).astype(np.float32) / 255.0
         x_t = x_0.copy()
