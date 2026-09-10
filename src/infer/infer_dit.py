@@ -10,7 +10,7 @@ from src.models.diffusion_vit import DiffusionViT
 
 @dataclass
 class InferConfig:
-    checkpoint_path: str = "dit_cold_diffusion_with_UNET_head_and_CNN_Stem_epoch_17.pth"
+    checkpoint_path: str = "DiT_trained_model.pth"    ## please set here the path to the weights file in your computer if needed
     input_dir: str = r"C:\Users\User\PyCharmMiscProject\deep_learning_project\degraded_output_images" ##change to the directory of the degraded pictures
     output_dir: str = r"C:\Users\User\PyCharmMiscProject\deep_learning_project\recreated_output_images" ##change to the directory you want to get the restored pictures
     image_size: int = 128
