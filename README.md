@@ -8,39 +8,48 @@ A unified deep learning framework implementing **Cold Diffusion** for photograph
 
 ```text
 EasyColdDiffusion/
-├── assets/
-│   ├── textures/             # Paper and scratch degradation textures
-│   └── test_images/          # Sample images for testing & restoration
-├── checkpoints/              # Directory for model checkpoint weights
-├── data/                     # Dataset storage (raw and processed 128x128)
-├── results/                  # Inference and restoration output images
+├── assets/                  # Degradation textures & sample test images
+│   ├── textures/            # Paper and scratch textures
+│   └── test_images/         # Sample images for testing & restoration
+├── checkpoints/             # Directory for model checkpoint weights
+├── data/                    # Dataset storage (raw and processed 128x128)
+├── results/                 # Inference and restoration output images
 ├── src/
-│   ├── datasets/             # Data loading and preprocessing
-│   │   ├── unet_dataset.py   # Recursive on-the-fly degradation dataset (U-Net)
-│   │   ├── dit_dataset.py    # Paired dataset loader (DiT)
-│   │   ├── download_coco.py  # COCO dataset downloader
-│   │   └── create_dataset.py # 128x128 center crop & resize pipeline
-│   ├── gui/                  # Interactive Tkinter restoration studio
-│   │   └── app.py            # Drag-and-drop, paste & live restoration GUI
-│   ├── models/               # Model architectures
-│   │   ├── unet.py           # Time-conditioned U-Net restoration model
-│   │   ├── diffusion_vit.py  # Diffusion Vision Transformer (DiT)
-│   │   ├── step_estimator.py # Lightweight damage & step budget neural estimator
-│   │   └── utils/            # Shared embedding & layer blocks
-│   ├── training/             # Training routines
-│   │   ├── train_unet.py     # U-Net Cold Diffusion trainer (Cosine Warmup)
-│   │   ├── train_dit.py      # DiT trainer
-│   │   └── train_estimator.py# Step & degradation estimator trainer
-│   ├── infer/                # Inference & evaluation
-│   │   ├── infer_unet.py     # U-Net evaluation & multi-step visualizer
-│   │   ├── infer_dit.py      # DiT tiled reconstruction with Hann window blending
-│   │   └── convergence.py    # Cauchy closed-loop convergence monitor
-│   ├── operations.py         # Degradation operators (sepia, cracks, stains, tears)
-│   └── operations_main.py    # Offline dataset degradation generator
-├── main.py                   # Unified CLI & GUI entry point
-├── trained_model.pth         # Pretrained U-Net weights
-├── requirements.txt          # Python dependencies
-└── install.sh                # Setup script
+│   ├── datasets/            # Data loading and preprocessing
+│   │   ├── create_dataset.py# 128x128 center crop & resize pipeline
+│   │   ├── dit_dataset.py   # Paired dataset loader (DiT)
+│   │   ├── download_coco.py # COCO dataset downloader
+│   │   └── unet_dataset.py  # On-the-fly degradation dataset (U-Net)
+│   ├── gui/                 # Interactive Tkinter restoration studio
+│   │   └── app.py           # Drag-and-drop, paste & live restoration GUI
+│   ├── infer/               # Specialized inference modules
+│   │   ├── __init__.py
+│   │   ├── convergence.py   # Cauchy closed-loop convergence monitor
+│   │   ├── infer_dit.py     # DiT inference & reconstruction pipeline
+│   │   └── infer_unet.py    # U-Net evaluation & multi-step visualizer
+│   ├── models/              # Model architectures
+│   │   ├── utils/           # Shared embedding & layer blocks
+│   │   │   └── __init__.py
+│   │   ├── diffusion_vit.py # Diffusion Vision Transformer (DiT)
+│   │   ├── step_estimator.py# Lightweight damage & step budget estimator
+│   │   └── unet.py          # Time-conditioned U-Net restoration model
+│   ├── training/            # Training routines
+│   │   ├── __init__.py
+│   │   ├── train_dit.py     # DiT trainer
+│   │   ├── train_estimator.py # Step & degradation estimator trainer
+│   │   └── train_unet.py    # U-Net Cold Diffusion trainer
+│   ├── __init__.py
+│   ├── infer.py             # Top-level inference module
+│   ├── operations.py        # Degradation operators (sepia, cracks, stains)
+│   └── operations_main.py   # Offline dataset degradation generator
+├── .gitignore               # Git ignore rules
+├── DiT_trained_model.pth    # Pretrained DiT model weights
+├── LICENSE                  # Project license
+├── README.md                # Project documentation
+├── install.sh               # Setup script
+├── main.py                  # Unified CLI & GUI entry point
+├── requirements.txt         # Python dependencies
+└── trained_model.pth        # Pretrained U-Net weights
 ```
 
 ---
