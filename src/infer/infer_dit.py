@@ -1,8 +1,9 @@
-"""Inference module for DiT Cold Diffusion restoration model using patch tiling."""
-
-import argparse
 from dataclasses import dataclass
 from pathlib import Path
+import sys, os
+# Ensure project root is on sys.path for module imports
+_project_root = Path(__file__).resolve().parents[2]
+sys.path.append(str(_project_root))
 import torch
 from torchvision import transforms
 from PIL import Image
@@ -10,23 +11,24 @@ from tqdm import tqdm
 
 from src.models.diffusion_vit import DiffusionViT
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-
 
 @dataclass
 class InferConfig:
-    checkpoint_path: str = str(PROJECT_ROOT / "checkpoints" / "dit_cold_diffusion_epoch_6.pth")
-    input_dir: str = str(PROJECT_ROOT / "data" / "degraded")
-    output_dir: str = str(PROJECT_ROOT / "results" / "dit_restored")
+    # Resolve paths relative to project root (EasyColdDiffusion)
+    _project_root = Path(__file__).resolve().parents[2]
+    checkpoint_path: str = str(_project_root / "checkpoints" / "DiT_weights.pth")
+    input_dir: str = str(_project_root / "test_pictures_origin")
+    output_dir: str = str(_project_root / "degraded_output_images")
     image_size: int = 128
     timesteps: int = 50
     sampling_steps: int = 50
-    overlap_ratio: float = 0.5
+    overlap_ratio: float = 0.5  # יחס החפיפה בין טאצ'ים (50% חפיפה)
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def restore_single_image(model: torch.nn.Module, degraded_tensor: torch.Tensor, config: InferConfig) -> torch.Tensor:
     x_t = degraded_tensor.clone()
+
     step_size = 1
     time_steps = list(range(config.timesteps, 0, -step_size))
     use_amp = config.device == "cuda"
@@ -36,7 +38,7 @@ def restore_single_image(model: torch.nn.Module, degraded_tensor: torch.Tensor, 
             t_tensor = torch.tensor([t_val], device=config.device)
             model_input = torch.cat([degraded_tensor, x_t], dim=1)
 
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast('cuda', enabled=use_amp):
                 pred_next_state = model(model_input, t_tensor)
 
             x_t = pred_next_state.clamp(-1.0, 1.0)
@@ -44,26 +46,30 @@ def restore_single_image(model: torch.nn.Module, degraded_tensor: torch.Tensor, 
     return x_t
 
 
-def restore_large_image_tiled(
-    model: torch.nn.Module,
-    degraded_tensor: torch.Tensor,
-    config: InferConfig,
-) -> torch.Tensor:
-    """Performs tiled inference with Hann window blending to eliminate patch boundary artifacts."""
+def restore_large_image_tiled(model: torch.nn.Module, degraded_tensor: torch.Tensor,
+                              config: InferConfig) -> torch.Tensor:
+    """
+    מבצע הסקה על תמונה (או חלק ממנה) תוך שימוש בחלונות חופפים ומיזוג מרחבי חלק (Hann Window)
+    כדי למנוע תפרים ופגמים גיאומטריים בין ה-patches.
+    """
     _, C, H, W = degraded_tensor.shape
     tile_size = config.image_size
 
+    # אם התמונה בגודל המדויק של האימון, נריץ אותה ישירות בלי חפיפה מיותרת
     if H == tile_size and W == tile_size:
         return restore_single_image(model, degraded_tensor, config)
 
     stride = int(tile_size * (1 - config.overlap_ratio))
 
+    # יצירת חלון משקולות דו-ממדי (Hann Window) להחלקה והקטנת משקל השוליים של כל טאץ'
     hann_1d = torch.hann_window(tile_size, periodic=False, device=config.device)
-    window_2d = torch.outer(hann_1d, hann_1d).unsqueeze(0).unsqueeze(0)
+    window_2d = torch.outer(hann_1d, hann_1d)
+    window_2d = window_2d.unsqueeze(0).unsqueeze(0)  # צורה: (1, 1, tile_size, tile_size)
 
     output_acc = torch.zeros((1, C, H, W), device=config.device)
     weight_acc = torch.zeros((1, 1, H, W), device=config.device)
 
+    # בניית רשימת הצעדים (קואורדינטות התחלתיות של כל טאץ')
     h_steps = list(range(0, H - tile_size + 1, stride))
     if h_steps and h_steps[-1] + tile_size < H:
         h_steps.append(H - tile_size)
@@ -78,26 +84,32 @@ def restore_large_image_tiled(
 
     for y in h_steps:
         for x in w_steps:
-            tile = degraded_tensor[:, :, y : y + tile_size, x : x + tile_size]
+            # חילוץ הטאץ' הנוכחי
+            tile = degraded_tensor[:, :, y:y + tile_size, x:x + tile_size]
             actual_h, actual_w = tile.shape[2], tile.shape[3]
 
+            # במקרה שהטאץ' בשוליים קטן מהגודל המלא, נבצע מילוי (Padding) זמני
             if actual_h < tile_size or actual_w < tile_size:
-                tile = torch.nn.functional.pad(
-                    tile, (0, tile_size - actual_w, 0, tile_size - actual_h), mode="reflect"
-                )
+                tile = torch.nn.functional.pad(tile, (0, tile_size - actual_w, 0, tile_size - actual_h), mode='reflect')
 
+            # הרצת תהליך השחזור על הטאץ'
             restored_tile = restore_single_image(model, tile, config)
+
+            # חזרה לגודל המקורי של הטאץ' אם בוצע Padding
             restored_tile = restored_tile[:, :, :actual_h, :actual_w]
             tile_window = window_2d[:, :, :actual_h, :actual_w]
 
-            output_acc[:, :, y : y + actual_h, x : x + actual_w] += restored_tile * tile_window
-            weight_acc[:, :, y : y + actual_h, x : x + actual_w] += tile_window
+            # צבירת הפיקסלים המשוקללים לתוך התמונה הגדולה
+            output_acc[:, :, y:y + actual_h, x:x + actual_w] += restored_tile * tile_window
+            weight_acc[:, :, y:y + actual_h, x:x + actual_w] += tile_window
 
+    # נרמול התוצאה הסופית בסכום המשקולות כדי לשמור על בהירות אחידה
     restored_full = output_acc / torch.clamp(weight_acc, min=1e-8)
     return restored_full
 
 
-def run_infer_dit(config: InferConfig) -> None:
+def main():
+    config = InferConfig()
     print(f"Using device: {config.device}")
 
     input_path = Path(config.input_dir)
@@ -122,21 +134,17 @@ def run_infer_dit(config: InferConfig) -> None:
         out_channels=3,
         dim=512,
         depth=8,
-        num_heads=8,
+        num_heads=8
     ).to(config.device)
 
-    if Path(config.checkpoint_path).exists():
-        checkpoint = torch.load(config.checkpoint_path, map_location=config.device, weights_only=True)
-        model.load_state_dict(checkpoint)
-        print(f"Loaded checkpoint from: {config.checkpoint_path}")
-    else:
-        print(f"Warning: Checkpoint not found at {config.checkpoint_path}")
-
+    checkpoint = torch.load(config.checkpoint_path, map_location=config.device, weights_only=True)
+    model.load_state_dict(checkpoint)
     model.eval()
 
+    # טרנספורמציה לשמירה על טווח ערכים נכון בלי כפיית Resize גלובלי
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
     to_pil = transforms.ToPILImage()
 
@@ -145,7 +153,10 @@ def run_infer_dit(config: InferConfig) -> None:
             degraded_img = Image.open(img_path).convert("RGB")
             degraded_tensor = transform(degraded_img).unsqueeze(0).to(config.device)
 
+            # הרצת שחזור מבוסס Tiling וחפיפה
             restored_tensor = restore_large_image_tiled(model, degraded_tensor, config)
+
+            # ביטול הנורמליזציה מ-[-1, 1] ל-[0, 1]
             restored_tensor = (restored_tensor.squeeze(0).cpu() * 0.5 + 0.5).clamp(0.0, 1.0)
             restored_image = to_pil(restored_tensor)
 
@@ -158,19 +169,4 @@ def run_infer_dit(config: InferConfig) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Infer DiT Cold Diffusion Restoration")
-    parser.add_argument("--checkpoint", type=str, default=str(PROJECT_ROOT / "checkpoints" / "dit_cold_diffusion_epoch_6.pth"))
-    parser.add_argument("--input_dir", type=str, default=str(PROJECT_ROOT / "data" / "degraded"))
-    parser.add_argument("--output_dir", type=str, default=str(PROJECT_ROOT / "results" / "dit_restored"))
-    parser.add_argument("--image_size", type=int, default=128)
-    parser.add_argument("--timesteps", type=int, default=50)
-    args = parser.parse_args()
-
-    cfg = InferConfig(
-        checkpoint_path=args.checkpoint,
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
-        image_size=args.image_size,
-        timesteps=args.timesteps,
-    )
-    run_infer_dit(cfg)
+    main()

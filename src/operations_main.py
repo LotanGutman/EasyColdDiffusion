@@ -6,11 +6,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 from tqdm import tqdm
-from deep_learning_project import operations
+from .operations import apply_manipulations
 
-# 1. עדכון הנתיבים
-input_dir = Path(r"C:\Users\User\Downloads\ffhq_128_70k_images")  #Path(r"C:\Users\User\PyCharmMiscProject\deep_learning_project\test_pictures_origin")
-output_dir = Path(r"C:\Users\User\PyCharmMiscProject\deep_learning_project\output")  #Path(r"C:\Users\User\PyCharmMiscProject\deep_learning_project\test_pictures_deg")
+# Updated directories
+input_dir = Path(r"../test_pictures_origin")
+output_dir = Path(r"../degraded_output_images")
 output_dir.mkdir(parents=True, exist_ok=True)
 
 # 2. איסוף מיוין של קבצים (מבטיח סדר עקבי ושומר על שמות המקור)
