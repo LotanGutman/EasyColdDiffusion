@@ -121,12 +121,20 @@ python main.py train-unet --clean_dir data/coco_128_clean --epochs 40 --batch_si
 
 #### Train DiT Model:
 ```bash
-python main.py train-dit --clean_dir data/clean --degraded_dir data/degraded --epochs 30 --batch_size 64
+# Step 1: Download COCO raw images
+
+# Step 2: Prepare 128x128 clean training set
+
+# Step 3: Run training
 ```
 
 #### Run DiT Inference with Tiling & Hann Window Blending:
 ```bash
-python main.py infer-dit --checkpoint checkpoints/dit_cold_diffusion_epoch_6.pth --input_dir data/degraded --output_dir results/dit_restored
+# 1. open infer.DiT.py
+# 2. update the relevant paths of the weights file "DiT_trained_model.pth"
+# 3. update the file where the 128X128 pictutres are saved
+# 4. update the directory where you want to save the restored images
+# 5. run the infer_DiT.py
 ```
 
 ---
