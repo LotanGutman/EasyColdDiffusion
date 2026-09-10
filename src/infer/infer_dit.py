@@ -1,9 +1,5 @@
 from dataclasses import dataclass
 from pathlib import Path
-import sys, os
-# Ensure project root is on sys.path for module imports
-_project_root = Path(__file__).resolve().parents[2]
-sys.path.append(str(_project_root))
 import torch
 from torchvision import transforms
 from PIL import Image
@@ -14,11 +10,9 @@ from src.models.diffusion_vit import DiffusionViT
 
 @dataclass
 class InferConfig:
-    # Resolve paths relative to project root (EasyColdDiffusion)
-    _project_root = Path(__file__).resolve().parents[2]
-    checkpoint_path: str = str(_project_root / "checkpoints" / "DiT_weights.pth")
-    input_dir: str = str(_project_root / "test_pictures_origin")
-    output_dir: str = str(_project_root / "degraded_output_images")
+    checkpoint_path: str = "dit_cold_diffusion_with_UNET_head_and_CNN_Stem_epoch_17.pth"
+    input_dir: str = r"C:\Users\User\PyCharmMiscProject\deep_learning_project\degraded_output_images" ##change to the directory of the degraded pictures
+    output_dir: str = r"C:\Users\User\PyCharmMiscProject\deep_learning_project\recreated_output_images" ##change to the directory you want to get the restored pictures
     image_size: int = 128
     timesteps: int = 50
     sampling_steps: int = 50
